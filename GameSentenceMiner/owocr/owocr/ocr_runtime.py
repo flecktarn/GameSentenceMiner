@@ -2945,9 +2945,27 @@ def _is_capture_frame_empty(image, sample_step=64):
             [pixels[x, y] for x in range(0, image.width, effective_step)]
             for y in range(0, image.height, effective_step)
         ]
-        return is_image_empty(np.asarray(sampled_pixels), sample_step=1)
+        if not is_image_empty(np.asarray(sampled_pixels), sample_step=1):
+            return False
+        # The sparse grid can miss a thin line of text on a plain background
+        # (e.g. white dialogue on black), so confirm against every pixel.
+        return _is_full_frame_blank(image)
     except Exception:
         return False
+
+
+def _is_full_frame_blank(image, tolerance=5, black_threshold=30):
+    """is_image_empty's rules over every pixel, using Pillow's native extrema."""
+    if image.mode == "L":
+        extrema = (image.getextrema(),)
+    elif image.mode in ("LA", "RGB", "RGBA"):
+        extrema = image.getextrema()[:3]
+    else:
+        return is_image_empty(np.asarray(image), sample_step=1)
+    ranges = [high - low for low, high in extrema]
+    if all(r <= tolerance for r in ranges):
+        return True
+    return all(high <= black_threshold for _, high in extrema) and all(r <= black_threshold // 2 for r in ranges)
 
 
 def are_images_identical(img1, img2, img2_np=None):

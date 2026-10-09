@@ -183,8 +183,22 @@ def test_sampled_empty_frame_decisions_are_unchanged(mode):
             samples = [
                 [image.getpixel((x, y)) for x in range(0, image.width, step)] for y in range(0, image.height, step)
             ]
-            expected = ocr_runtime.is_image_empty(np.asarray(samples), sample_step=1)
+            # Blank only if the sample looks blank and every pixel confirms it.
+            expected = ocr_runtime.is_image_empty(np.asarray(samples), sample_step=1) and (
+                ocr_runtime.is_image_empty(np.asarray(image), sample_step=1)
+            )
             assert ocr_runtime._is_capture_frame_empty(image) == expected
+
+
+def test_thin_text_between_sample_rows_is_not_a_blank_frame():
+    from GameSentenceMiner.owocr.owocr import ocr_runtime
+
+    # White dialogue on black, as in Higurashi: a line that falls between the 64px sample rows.
+    pixels = np.zeros((697, 1252, 3), dtype=np.uint8)
+    pixels[540:560, 130:420:3] = 255
+    image = Image.fromarray(pixels)
+    assert ocr_runtime._is_capture_frame_empty(image) is False
+    assert ocr_runtime._is_capture_frame_empty(Image.new("RGB", (1252, 697))) is True
 
 
 def test_serialization_keeps_asdict_rules_for_extended_schema():
