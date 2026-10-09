@@ -51,8 +51,10 @@
 		addToJapaneseSrs,
 		describeAddedCard,
 		japaneseSrsEnabled$,
+		lookupWord,
 		rememberAddedWords,
 		splitLine,
+		type DictionaryEntry,
 		type WordSegment,
 	} from '../japanese-srs';
 
@@ -110,7 +112,13 @@
 	// The line split into vocabulary, so words can be clicked and added to the SRS.
 	let segments: WordSegment[] | null = null;
 	let segmentsFor = '';
-	let wordPopover: { segment: WordSegment; style: string } | null = null;
+	let wordPopover: {
+		segment: WordSegment;
+		style: string;
+		entry?: DictionaryEntry | null;
+		lookupError?: string;
+		looking: boolean;
+	} | null = null;
 	$: if ($japaneseSrsEnabled$ && line.text !== segmentsFor) {
 		loadSegments(line.text);
 	}
@@ -133,10 +141,19 @@
 		event.stopPropagation();
 		const view = getActionsWindow();
 		const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-		const left = Math.min(Math.max(8, rect.left), view.innerWidth - 228);
-		const below = rect.bottom + 6 + 90 <= view.innerHeight;
+		const left = Math.min(Math.max(8, rect.left), view.innerWidth - 268);
+		const below = rect.bottom + 6 + 170 <= view.innerHeight;
 		const position = below ? `top: ${Math.round(rect.bottom + 6)}px;` : `bottom: ${Math.round(view.innerHeight - rect.top + 6)}px;`;
-		wordPopover = { segment, style: `left: ${Math.round(left)}px; ${position}` };
+		const popover = { segment, style: `left: ${Math.round(left)}px; ${position}`, looking: true };
+		wordPopover = popover;
+		lookupWord(segment.base || segment.text).then(
+			(entry) => {
+				if (wordPopover === popover) wordPopover = { ...popover, entry, looking: false };
+			},
+			(error: Error) => {
+				if (wordPopover === popover) wordPopover = { ...popover, lookupError: error.message, looking: false };
+			},
+		);
 		getActionsDocument().addEventListener('click', closeWordPopover, false);
 		getActionsDocument().addEventListener('keydown', wordPopoverKeyHandler, false);
 		getActionsDocument().addEventListener('scroll', closeWordPopover, true);
@@ -834,9 +851,30 @@
 {/key}
 {#if wordPopover}
 	<div class="srs-word-popover" style={wordPopover.style} on:click|stopPropagation={dummyFn} on:keyup={dummyFn} role="dialog" tabindex="-1">
-		<div class="srs-word-popover-word">{wordPopover.segment.base}</div>
+		<div class="srs-word-popover-word">
+			{wordPopover.entry?.kanji || wordPopover.segment.base}
+			{#if wordPopover.entry?.reading && wordPopover.entry.reading !== wordPopover.entry.kanji}
+				<span class="srs-word-popover-reading">{wordPopover.entry.reading}</span>
+			{/if}
+		</div>
 		{#if wordPopover.segment.base !== wordPopover.segment.text}
 			<div class="srs-word-popover-note">as 「{wordPopover.segment.text}」 in this line</div>
+		{/if}
+		{#if wordPopover.looking}
+			<div class="srs-word-popover-note">Looking up…</div>
+		{:else if wordPopover.entry}
+			<div class="srs-word-popover-meaning">{wordPopover.entry.meaning || 'No definition found.'}</div>
+			{#if wordPopover.entry.parts_of_speech || wordPopover.entry.jlpt}
+				<div class="srs-word-popover-note">
+					{[wordPopover.entry.parts_of_speech, wordPopover.entry.jlpt?.toUpperCase().replace('JLPT-', 'JLPT ')]
+						.filter(Boolean)
+						.join(' · ')}
+				</div>
+			{/if}
+		{:else if wordPopover.lookupError}
+			<div class="srs-word-popover-note">Couldn't look it up: {wordPopover.lookupError}</div>
+		{:else}
+			<div class="srs-word-popover-note">Not found in the dictionary.</div>
 		{/if}
 		{#if isInSrs(wordPopover.segment, $addedWords$)}
 			<div class="srs-word-popover-note in-srs">✓ Already in your SRS</div>
@@ -893,7 +931,7 @@
 	.srs-word-popover {
 		position: fixed;
 		z-index: 70;
-		width: 220px;
+		width: 260px;
 		padding: 8px;
 		border: 1px solid #555;
 		border-radius: 4px;
@@ -908,6 +946,24 @@
 	.srs-word-popover-word {
 		font-size: 20px;
 		font-weight: 700;
+	}
+
+	.srs-word-popover-reading {
+		margin-left: 6px;
+		color: #9cc8ef;
+		font-size: 14px;
+		font-weight: 600;
+	}
+
+	.srs-word-popover-meaning {
+		margin-top: 6px;
+		color: #eee;
+		font-size: 13px;
+		display: -webkit-box;
+		-webkit-line-clamp: 4;
+		line-clamp: 4;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
 	}
 
 	.srs-word-popover-note {

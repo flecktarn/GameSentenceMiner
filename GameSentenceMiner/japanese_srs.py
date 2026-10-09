@@ -228,6 +228,25 @@ def build_card_fields(word: str, sentence: str, translation: str, entry: dict[st
     return fields
 
 
+_lookup_cache: OrderedDict[str, dict[str, Any] | None] = OrderedDict()
+_lookup_cache_lock = threading.Lock()
+LOOKUP_CACHE_SIZE = 500
+
+
+def lookup_entry(word: str, client: JapaneseSrsClient | None = None) -> dict[str, Any] | None:
+    """Best dictionary entry for ``word`` (via the SRS app's Jisho endpoint), cached."""
+    with _lookup_cache_lock:
+        if word in _lookup_cache:
+            _lookup_cache.move_to_end(word)
+            return _lookup_cache[word]
+    entry = pick_entry(word, (client or JapaneseSrsClient.from_settings()).lookup(word))
+    with _lookup_cache_lock:
+        _lookup_cache[word] = entry
+        while len(_lookup_cache) > LOOKUP_CACHE_SIZE:
+            _lookup_cache.popitem(last=False)
+    return entry
+
+
 def add_word(
     word: str, sentence: str = "", translation: str = "", screenshot: bytes | None = None
 ) -> tuple[dict[str, Any], str]:
@@ -243,7 +262,7 @@ def add_word(
     client = JapaneseSrsClient.from_settings(settings)
 
     try:
-        entry = pick_entry(word, client.lookup(word))
+        entry = lookup_entry(word, client)
     except JapaneseSrsAuthError:
         raise
     except JapaneseSrsError as exc:

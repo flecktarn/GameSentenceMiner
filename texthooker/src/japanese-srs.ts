@@ -111,3 +111,30 @@ export function splitLine(text: string): Promise<WordSegment[] | null> {
 	}
 	return promise;
 }
+
+export interface DictionaryEntry {
+	kanji: string;
+	reading: string;
+	meaning: string;
+	parts_of_speech?: string | null;
+	jlpt?: string | null;
+	is_common?: boolean | null;
+}
+
+const lookupCache = new Map<string, Promise<DictionaryEntry | null>>();
+
+/** Dictionary entry for a word (null if none); rejects with a message if the lookup failed. */
+export function lookupWord(word: string): Promise<DictionaryEntry | null> {
+	const cached = lookupCache.get(word);
+	if (cached) return cached;
+	const promise = fetch(getGSMEndpoint(`/api/japanese-srs/lookup?word=${encodeURIComponent(word)}`)).then(
+		async (response) => {
+			const data = await response.json().catch(() => ({}));
+			if (!response.ok) throw new Error(data.error || `Lookup failed (HTTP ${response.status}).`);
+			return data.entry ?? null;
+		},
+	);
+	promise.catch(() => lookupCache.delete(word)); // Let a later click retry.
+	lookupCache.set(word, promise);
+	return promise;
+}

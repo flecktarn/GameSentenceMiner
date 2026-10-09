@@ -59,6 +59,11 @@ class FakeBackend:
         return FakeResponse(404, {"detail": "Not found."})
 
 
+@pytest.fixture(autouse=True)
+def fresh_lookup_cache(monkeypatch):
+    monkeypatch.setattr(japanese_srs, "_lookup_cache", japanese_srs.OrderedDict())
+
+
 @pytest.fixture
 def backend(monkeypatch):
     fake = FakeBackend(
@@ -387,3 +392,35 @@ def test_tokenize_route(monkeypatch):
     assert {"text": "顔", "base": "顔", "pos": "noun", "in_srs": True} in first
     assert empty == []
     assert client.post("/api/japanese-srs/tokenize", json={"texts": "nope"}).status_code == 400
+
+
+def test_lookup_is_cached_and_reused_when_adding(backend):
+    entry = japanese_srs.lookup_entry("食べる", japanese_srs.JapaneseSrsClient(API, "t"))
+    japanese_srs.add_word("食べる")
+
+    assert entry["meaning"] == "to eat"
+    assert [c for c in backend.calls if c[1] == "/jisho/"] == [("GET", "/jisho/", {"keyword": "食べる"}, None)]
+
+
+def test_lookup_route(monkeypatch):
+    from GameSentenceMiner.web import texthooking_page
+
+    monkeypatch.setattr(
+        japanese_srs,
+        "lookup_entry",
+        lambda word: {"kanji": word, "reading": "あたま", "meaning": "head", "all_definitions": ["x"]},
+    )
+    client = texthooking_page.app.test_client()
+
+    response = client.get("/api/japanese-srs/lookup?word=頭")
+
+    assert response.status_code == 200
+    assert response.get_json()["entry"] == {
+        "kanji": "頭",
+        "reading": "あたま",
+        "meaning": "head",
+        "parts_of_speech": None,
+        "jlpt": None,
+        "is_common": None,
+    }
+    assert client.get("/api/japanese-srs/lookup").status_code == 400

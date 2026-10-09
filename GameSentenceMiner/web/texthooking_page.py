@@ -1357,6 +1357,24 @@ def japanese_srs_tokenize():
     return jsonify({"lines": lines}), 200
 
 
+@app.route("/api/japanese-srs/lookup", methods=["GET"])
+def japanese_srs_lookup():
+    """Dictionary entry for a word, shown before it's added. Query: ?word=..."""
+    from GameSentenceMiner import japanese_srs
+
+    word = str(request.args.get("word") or "").strip()
+    if not word:
+        return jsonify({"error": "word is required"}), 400
+    try:
+        entry = japanese_srs.lookup_entry(word)
+    except japanese_srs.JapaneseSrsError as exc:
+        return jsonify({"error": str(exc)}), 502
+    if entry is None:
+        return jsonify({"entry": None}), 200
+    keys = ("kanji", "reading", "meaning", "parts_of_speech", "jlpt", "is_common")
+    return jsonify({"entry": {key: entry.get(key) for key in keys}}), 200
+
+
 @app.route("/api/japanese-srs/add", methods=["POST"])
 def japanese_srs_add():
     """Add the word selected in a Text Feed line to the Japanese SRS app."""
