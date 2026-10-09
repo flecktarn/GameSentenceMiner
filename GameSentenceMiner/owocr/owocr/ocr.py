@@ -2473,6 +2473,13 @@ class AppleLiveText:
                     }
                 },
             )
+            # Results are otherwise delivered on the main queue, which never fires
+            # when OCR runs on a worker thread; use a private queue instead.
+            try:
+                self._callback_queue = importlib.import_module("dispatch").dispatch_queue_create(b"gsm.alivetext", None)
+            except Exception as e:  # noqa: BLE001 - fall back to the run-loop path below.
+                logger.warning(f"Apple Live Text could not create a callback queue: {e}")
+                self._callback_queue = None
             self.language = [lang, "en"]
             self.available = True
             logger.info("Apple Live Text ready")
@@ -2486,15 +2493,30 @@ class AppleLiveText:
 
         try:
             with self._objc.autorelease_pool():
-                self.current_run_loop = self._CFRunLoopGetCurrent()
                 analyzer = self.VKCImageAnalyzer.alloc().init()
                 req = self.VKCImageAnalyzerRequest.alloc().initWithImage_requestType_(
                     self._preprocess(img), 1
                 )  # VKAnalysisTypeText
                 req.setLocales_(self.language)
-                analyzer.processRequest_progressHandler_completionHandler_(req, lambda progress: None, self._process)
+                if self._callback_queue is not None:
+                    self.current_run_loop = None
+                    done = threading.Event()
 
-                self._CFRunLoopRunInMode(self._kCFRunLoopDefaultMode, 10.0, False)
+                    def on_complete(analysis, error):
+                        try:
+                            self._process(analysis, error)
+                        finally:
+                            done.set()
+
+                    analyzer.setCallbackQueue_(self._callback_queue)
+                    analyzer.processRequest_progressHandler_completionHandler_(req, lambda progress: None, on_complete)
+                    done.wait(10.0)
+                else:
+                    self.current_run_loop = self._CFRunLoopGetCurrent()
+                    analyzer.processRequest_progressHandler_completionHandler_(
+                        req, lambda progress: None, self._process
+                    )
+                    self._CFRunLoopRunInMode(self._kCFRunLoopDefaultMode, 10.0, False)
         except Exception as e:
             logger.error(f"Apple Live Text engine encountered an error during analysis: {e}")
             if is_path:
@@ -2516,6 +2538,11 @@ class AppleLiveText:
         return x
 
     def _process(self, analysis, error):
+        if analysis is None:
+            logger.error(f"Apple Live Text analysis failed: {error}")
+            if self.current_run_loop:
+                self._CFRunLoopStop(self.current_run_loop)
+            return
         lines = []
         response_lines = analysis.allLines()
         if response_lines:
@@ -2555,10 +2582,8 @@ class AppleLiveText:
             paragraphs = []
 
         self.result = paragraphs
-        if hasattr(self, "current_run_loop") and self.current_run_loop:
+        if self.current_run_loop:
             self._CFRunLoopStop(self.current_run_loop)
-        else:
-            self._CFRunLoopStop(self._CFRunLoopGetCurrent())
 
     def _preprocess(self, img):
         image_bytes = pil_image_to_bytes(img, "tiff")
