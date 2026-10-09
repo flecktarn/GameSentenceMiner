@@ -1898,6 +1898,8 @@ class JapaneseSrs:
     # API token from /auth/login/. The password itself is never stored.
     token: str = ""
     deck_name: str = "Default"
+    # Tag each card with the game it was mined from (the OBS scene name).
+    tag_with_game: bool = True
 
     def __post_init__(self):
         self.api_url = str(self.api_url or "").strip().rstrip("/")

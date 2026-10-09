@@ -50,6 +50,11 @@ def build_japanese_srs_tab(window: ConfigWindow, binder: BindingManager, i18n: d
     layout.addRow("API URL:", api_url_edit)
     binder.bind(("master", "japanese_srs", "api_url"), api_url_edit)
 
+    tag_game_check = QCheckBox()
+    tag_game_check.setToolTip("Adds a tag named after the game (the OBS scene), e.g. Higurashi, to each card.")
+    layout.addRow("Tag cards with game:", tag_game_check)
+    binder.bind(("master", "japanese_srs", "tag_with_game"), tag_game_check)
+
     deck_edit = QLineEdit()
     deck_edit.setToolTip("Cards are added to this deck. It is created if it doesn't exist.")
     layout.addRow("Deck:", deck_edit)

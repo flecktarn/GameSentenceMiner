@@ -1390,9 +1390,11 @@ def japanese_srs_add():
     translation = getattr(line, "TL", "") or ""
     all_lines = get_all_lines()
     is_latest_line = bool(all_lines) and line is not None and all_lines[-1].id == line.id
+    # The game the line came from (its OBS scene), else whatever is being played now.
+    game = getattr(line, "scene", "") or get_current_game() or ""
     try:
         screenshot = japanese_srs.screenshot_for_line(line_id, is_latest_line)
-        card, warning = japanese_srs.add_word(word, sentence, translation, screenshot)
+        card, warning = japanese_srs.add_word(word, sentence, translation, screenshot, game)
     except japanese_srs.JapaneseSrsError as exc:
         return jsonify({"error": str(exc)}), 502
     except Exception as exc:  # noqa: BLE001 - report any failure to the Text Feed instead of a bare 500.

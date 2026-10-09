@@ -32,6 +32,8 @@ class FakeBackend:
         self.calls = []
         self.images = {}
         self.image_status = 200
+        self.tags = []
+        self.tag_status = 201
 
     def request(self, method, url, timeout=None, params=None, json=None, files=None):
         path = url.removeprefix(API)
@@ -44,6 +46,14 @@ class FakeBackend:
             card["image_url"] = f"{API}/media/cards/abc.jpg"
             self.images[card_id] = files["image"][1]
             return FakeResponse(200, card)
+        if path == "/tags/" and method == "GET":
+            return FakeResponse(200, self.tags)
+        if path == "/tags/" and method == "POST":
+            if self.tag_status != 201:
+                return FakeResponse(self.tag_status, {"detail": "Tags are down"})
+            tag = {"id": len(self.tags) + 1, **json}
+            self.tags.append(tag)
+            return FakeResponse(201, tag)
         if path == "/jisho/":
             return FakeResponse(self.jisho_status, {"results": self.jisho, "detail": "Jisho down"})
         if path == "/decks/" and method == "GET":
@@ -188,7 +198,7 @@ def test_older_config_without_section_loads_defaults():
 def test_add_route_uses_line_text_and_translation(monkeypatch):
     from GameSentenceMiner.web import texthooking_page
 
-    line = SimpleNamespace(id="L1", text="パンを食べたい。", TL="I want to eat bread.")
+    line = SimpleNamespace(id="L1", text="パンを食べたい。", TL="I want to eat bread.", scene="Higurashi")
     monkeypatch.setattr(texthooking_page, "get_event_line_by_id", lambda event_id: line if event_id == "L1" else None)
     monkeypatch.setattr(texthooking_page, "get_all_lines", lambda: [SimpleNamespace(id="L0"), SimpleNamespace(id="L1")])
     monkeypatch.setattr(
@@ -204,7 +214,7 @@ def test_add_route_uses_line_text_and_translation(monkeypatch):
 
     assert response.status_code == 200
     assert response.get_json() == {"card": {"id": 1, "kanji": "食べる"}, "warning": "upload warning"}
-    assert calls == [("食べた", "パンを食べたい。", "I want to eat bread.", b"jpeg:L1:True")]
+    assert calls == [("食べた", "パンを食べたい。", "I want to eat bread.", b"jpeg:L1:True", "Higurashi")]
     assert client.post("/api/japanese-srs/add", json={"id": "L1", "word": ""}).status_code == 400
 
 
@@ -212,6 +222,7 @@ def test_add_route_reports_srs_errors(monkeypatch):
     from GameSentenceMiner.web import texthooking_page
 
     monkeypatch.setattr(texthooking_page, "get_event_line_by_id", lambda event_id: None)
+    monkeypatch.setattr(texthooking_page, "get_current_game", lambda: "")
     monkeypatch.setattr(japanese_srs, "screenshot_for_line", lambda *_args: None)
 
     def fail(*_args):
@@ -424,3 +435,37 @@ def test_lookup_route(monkeypatch):
         "is_common": None,
     }
     assert client.get("/api/japanese-srs/lookup").status_code == 400
+
+
+def test_card_is_tagged_with_the_game_and_the_tag_is_reused(backend):
+    first, warning = japanese_srs.add_word("食べる", game="Higurashi")
+    second, _ = japanese_srs.add_word("猫", game="higurashi")  # Case-insensitive match.
+
+    assert warning == ""
+    assert len(backend.tags) == 1
+    tag = backend.tags[0]
+    assert tag["name"] == "Higurashi" and tag["color"] in japanese_srs.TAG_COLORS
+    assert first["tags"] == [tag["id"]] and second["tags"] == [tag["id"]]
+
+
+def test_game_tag_can_be_turned_off(backend):
+    backend.settings.tag_with_game = False
+
+    card, _ = japanese_srs.add_word("食べる", game="Higurashi")
+
+    assert "tags" not in card and backend.tags == []
+
+
+def test_no_game_means_no_tag(backend):
+    card, _ = japanese_srs.add_word("食べる", game="  ")
+
+    assert "tags" not in card
+
+
+def test_failed_game_tag_keeps_the_card(backend):
+    backend.tag_status = 500
+
+    card, warning = japanese_srs.add_word("食べる", game="Higurashi")
+
+    assert len(backend.cards) == 1 and "tags" not in card
+    assert "game tag couldn't be added" in warning

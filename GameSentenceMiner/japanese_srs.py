@@ -8,6 +8,7 @@ its first example sentence and a screenshot of that moment attached.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import re
 import threading
@@ -29,6 +30,8 @@ SCREENSHOT_JPEG_QUALITY = 82
 TRAILING_LINE_MARKERS = "▶▷►▸▼▽◆◇■□⏎↵"
 # How long the list of words already in the SRS is trusted before a background refresh.
 KNOWN_WORDS_TTL_SECONDS = 300
+# Same palette as the SRS app's tag colours; a game's tag gets a stable colour from its name.
+TAG_COLORS = ("#c8433d", "#d99a3c", "#c9b03a", "#4e9d6c", "#3f9aa0", "#3f7fb0", "#7a5bb5", "#b5577f", "#8c8171")
 
 
 class JapaneseSrsError(Exception):
@@ -147,6 +150,14 @@ class JapaneseSrsClient:
                 raise JapaneseSrsError(f"Could not list cards: {exc}") from exc
             data = response.json()
 
+    def get_or_create_tag(self, name: str) -> dict[str, Any]:
+        for tag in self._request("GET", "tags/"):
+            if str(tag.get("name", "")).casefold() == name.casefold():
+                return tag
+        color = TAG_COLORS[int(hashlib.md5(name.encode()).hexdigest(), 16) % len(TAG_COLORS)]
+        logger.info(f"Creating Japanese SRS tag '{name}'.")
+        return self._request("POST", "tags/", json={"name": name, "color": color})
+
     def attach_image(self, card_id: int, jpeg: bytes) -> dict[str, Any]:
         return self._request("POST", f"cards/{card_id}/image/", files={"image": ("screenshot.jpg", jpeg, "image/jpeg")})
 
@@ -248,12 +259,12 @@ def lookup_entry(word: str, client: JapaneseSrsClient | None = None) -> dict[str
 
 
 def add_word(
-    word: str, sentence: str = "", translation: str = "", screenshot: bytes | None = None
+    word: str, sentence: str = "", translation: str = "", screenshot: bytes | None = None, game: str = ""
 ) -> tuple[dict[str, Any], str]:
-    """Look up ``word`` and add it to the configured deck.
+    """Look up ``word`` and add it to the configured deck, tagged with ``game``.
 
     Returns the created card and a warning ("" if none). A failed screenshot
-    upload is only a warning: the card itself was saved.
+    upload or game tag is only a warning: the card itself was saved.
     """
     word = word.strip()
     if not word:
@@ -270,19 +281,30 @@ def add_word(
         logger.warning(f"Japanese SRS dictionary lookup failed for '{word}': {exc}")
         entry = None
 
+    warnings = []
+    fields = build_card_fields(word, sentence, translation, entry)
+    game = game.strip()
+    if settings.tag_with_game and game:
+        try:
+            fields["tags"] = [client.get_or_create_tag(game[:40])["id"]]
+        except JapaneseSrsAuthError:
+            raise
+        except JapaneseSrsError as exc:
+            logger.warning(f"Japanese SRS: couldn't tag the card with '{game}': {exc}")
+            warnings.append(f"The game tag couldn't be added: {exc}")
+
     deck = client.get_or_create_deck(settings.deck_name)
-    card = client.create_card(deck["id"], build_card_fields(word, sentence, translation, entry))
+    card = client.create_card(deck["id"], fields)
     logger.info(f"Added '{card.get('kanji')}' to Japanese SRS deck '{deck.get('name')}'.")
     remember_known_word(word, card.get("kanji", ""), card.get("reading", ""))
 
-    warning = ""
     if screenshot:
         try:
             card = client.attach_image(card["id"], screenshot)
         except JapaneseSrsError as exc:
             logger.warning(f"Japanese SRS: card added but the screenshot upload failed: {exc}")
-            warning = f"The screenshot couldn't be attached: {exc}"
-    return card, warning
+            warnings.append(f"The screenshot couldn't be attached: {exc}")
+    return card, " ".join(warnings)
 
 
 # --- Words already in the SRS (for marking them in the Text Feed) ---
