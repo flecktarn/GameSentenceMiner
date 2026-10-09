@@ -30,10 +30,20 @@ class FakeBackend:
         self.jisho_status = jisho_status
         self.cards = []
         self.calls = []
+        self.images = {}
+        self.image_status = 200
 
-    def request(self, method, url, timeout=None, params=None, json=None):
+    def request(self, method, url, timeout=None, params=None, json=None, files=None):
         path = url.removeprefix(API)
         self.calls.append((method, path, params, json))
+        if path.endswith("/image/") and method == "POST":
+            if self.image_status != 200:
+                return FakeResponse(self.image_status, {"detail": "Disk full"})
+            card_id = int(path.split("/")[2])
+            card = next(c for c in self.cards if c["id"] == card_id)
+            card["image_url"] = f"{API}/media/cards/abc.jpg"
+            self.images[card_id] = files["image"][1]
+            return FakeResponse(200, card)
         if path == "/jisho/":
             return FakeResponse(self.jisho_status, {"results": self.jisho, "detail": "Jisho down"})
         if path == "/decks/" and method == "GET":
@@ -64,20 +74,24 @@ def backend(monkeypatch):
 
 
 def test_add_word_creates_default_deck_and_card(backend):
-    card = japanese_srs.add_word("食べた", "パンを食べたい。", "I want to eat bread.")
+    card, warning = japanese_srs.add_word("食べた", "パンを食べたい。▶", "I want to eat bread.")
 
     assert backend.decks == [{"id": 1, "name": "Default"}]
     assert card["deck"] == 1
     assert card["kanji"] == "食べる"
     assert card["reading"] == "たべる"
     assert card["meaning"] == "to eat"
-    assert card["example_sentences"] == [{"ja": "パンを食べたい。", "reading": "", "en": "I want to eat bread."}]
+    assert card["example_sentences"] == [
+        {"ja": "パンを食べたい。", "reading": "", "en": "I want to eat bread.", "source": "game"}
+    ]
+    assert warning == ""
+    assert backend.images == {}
 
 
 def test_add_word_reuses_existing_deck_case_insensitively(backend):
     backend.decks.append({"id": 7, "name": "default"})
 
-    card = japanese_srs.add_word("食べる")
+    card, _ = japanese_srs.add_word("食べる")
 
     assert card["deck"] == 7
     assert len(backend.decks) == 1
@@ -87,7 +101,7 @@ def test_add_word_reuses_existing_deck_case_insensitively(backend):
 def test_add_word_still_creates_card_when_dictionary_fails(backend):
     backend.jisho_status = 502
 
-    card = japanese_srs.add_word("珍語", "珍語だ。")
+    card, _ = japanese_srs.add_word("珍語", "珍語だ。")
 
     assert card["kanji"] == "珍語"
     assert card["meaning"] == ""
@@ -169,17 +183,23 @@ def test_older_config_without_section_loads_defaults():
 def test_add_route_uses_line_text_and_translation(monkeypatch):
     from GameSentenceMiner.web import texthooking_page
 
-    line = SimpleNamespace(text="パンを食べたい。", TL="I want to eat bread.")
+    line = SimpleNamespace(id="L1", text="パンを食べたい。", TL="I want to eat bread.")
     monkeypatch.setattr(texthooking_page, "get_event_line_by_id", lambda event_id: line if event_id == "L1" else None)
+    monkeypatch.setattr(texthooking_page, "get_all_lines", lambda: [SimpleNamespace(id="L0"), SimpleNamespace(id="L1")])
+    monkeypatch.setattr(
+        japanese_srs, "screenshot_for_line", lambda line_id, latest: f"jpeg:{line_id}:{latest}".encode()
+    )
     calls = []
-    monkeypatch.setattr(japanese_srs, "add_word", lambda *args: calls.append(args) or {"id": 1, "kanji": "食べる"})
+    monkeypatch.setattr(
+        japanese_srs, "add_word", lambda *args: calls.append(args) or ({"id": 1, "kanji": "食べる"}, "upload warning")
+    )
     client = texthooking_page.app.test_client()
 
     response = client.post("/api/japanese-srs/add", json={"id": "L1", "word": "食べた"})
 
     assert response.status_code == 200
-    assert response.get_json()["card"]["kanji"] == "食べる"
-    assert calls == [("食べた", "パンを食べたい。", "I want to eat bread.")]
+    assert response.get_json() == {"card": {"id": 1, "kanji": "食べる"}, "warning": "upload warning"}
+    assert calls == [("食べた", "パンを食べたい。", "I want to eat bread.", b"jpeg:L1:True")]
     assert client.post("/api/japanese-srs/add", json={"id": "L1", "word": ""}).status_code == 400
 
 
@@ -187,6 +207,7 @@ def test_add_route_reports_srs_errors(monkeypatch):
     from GameSentenceMiner.web import texthooking_page
 
     monkeypatch.setattr(texthooking_page, "get_event_line_by_id", lambda event_id: None)
+    monkeypatch.setattr(japanese_srs, "screenshot_for_line", lambda *_args: None)
 
     def fail(*_args):
         raise japanese_srs.JapaneseSrsError("Log in to Japanese SRS in GSM settings first.")
@@ -197,3 +218,78 @@ def test_add_route_reports_srs_errors(monkeypatch):
 
     assert response.status_code == 502
     assert "Log in" in response.get_json()["error"]
+
+
+def test_screenshot_is_uploaded_to_the_new_card(backend):
+    card, warning = japanese_srs.add_word("食べる", "パンを食べたい。", screenshot=b"\xff\xd8jpeg")
+
+    assert warning == ""
+    assert card["image_url"].endswith("abc.jpg")
+    assert backend.images == {card["id"]: b"\xff\xd8jpeg"}
+
+
+def test_failed_screenshot_upload_keeps_the_card(backend):
+    backend.image_status = 500
+
+    _, warning = japanese_srs.add_word("食べる", screenshot=b"\xff\xd8jpeg")
+
+    assert len(backend.cards) == 1
+    assert "screenshot couldn't be attached" in warning
+
+
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [("どうせ引き裂かれるなら、▶", "どうせ引き裂かれるなら、"), ("  台詞。 ▼ ", "台詞。"), ("▶で始まる", "▶で始まる")],
+)
+def test_clean_sentence_strips_trailing_page_markers(raw, clean):
+    assert japanese_srs.clean_sentence(raw) == clean
+
+
+@pytest.fixture
+def fresh_screenshots(monkeypatch):
+    monkeypatch.setattr(japanese_srs, "_screenshots", japanese_srs.OrderedDict())
+    return japanese_srs._screenshots
+
+
+def test_screenshots_are_cached_per_line_and_capped(monkeypatch, fresh_screenshots):
+    shots = iter(range(1000))
+    monkeypatch.setattr(japanese_srs, "capture_screenshot_jpeg", lambda: f"shot{next(shots)}".encode())
+    for i in range(japanese_srs.SCREENSHOT_CACHE_LINES + 5):
+        japanese_srs._remember_screenshot(f"line{i}")
+
+    assert len(fresh_screenshots) == japanese_srs.SCREENSHOT_CACHE_LINES
+    assert "line0" not in fresh_screenshots
+    assert japanese_srs.screenshot_for_line("line7", is_latest_line=False) == b"shot7"
+
+
+def test_uncached_line_only_gets_a_live_screenshot_if_still_on_screen(monkeypatch, fresh_screenshots):
+    monkeypatch.setattr(japanese_srs, "capture_screenshot_jpeg", lambda: b"live")
+
+    assert japanese_srs.screenshot_for_line("old", is_latest_line=False) is None
+    assert japanese_srs.screenshot_for_line("newest", is_latest_line=True) == b"live"
+
+
+def test_new_lines_are_only_captured_while_enabled(monkeypatch, fresh_screenshots):
+    started = []
+    monkeypatch.setattr(
+        japanese_srs.threading, "Thread", lambda target, args, **kw: SimpleNamespace(start=lambda: started.append(args))
+    )
+    monkeypatch.setattr(japanese_srs, "get_settings", lambda: JapaneseSrs(enabled=False))
+    japanese_srs.on_new_line(SimpleNamespace(id=5))
+    monkeypatch.setattr(japanese_srs, "get_settings", lambda: JapaneseSrs(enabled=True))
+    japanese_srs.on_new_line(SimpleNamespace(id=6))
+
+    assert started == [("6",)]
+
+
+def test_capture_compresses_to_a_bounded_jpeg(monkeypatch):
+    from PIL import Image
+
+    from GameSentenceMiner import obs
+
+    monkeypatch.setattr(obs, "get_screenshot_PIL", lambda **kw: Image.new("RGBA", (2560, 1440), (10, 20, 30, 255)))
+    jpeg = japanese_srs.capture_screenshot_jpeg()
+
+    img = Image.open(japanese_srs.io.BytesIO(jpeg))
+    assert img.format == "JPEG"
+    assert max(img.size) == japanese_srs.SCREENSHOT_MAX_SIDE

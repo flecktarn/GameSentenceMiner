@@ -1349,17 +1349,21 @@ def japanese_srs_add():
     word = str(data.get("word") or "").strip()
     if not word:
         return jsonify({"error": "Select a word in the line first."}), 400
-    line = get_event_line_by_id(data.get("id")) if data.get("id") is not None else None
+    line_id = data.get("id")
+    line = get_event_line_by_id(line_id) if line_id is not None else None
     sentence = line.text if line is not None else str(data.get("text") or "")
     translation = getattr(line, "TL", "") or ""
+    all_lines = get_all_lines()
+    is_latest_line = bool(all_lines) and line is not None and all_lines[-1].id == line.id
     try:
-        card = japanese_srs.add_word(word, sentence, translation)
+        screenshot = japanese_srs.screenshot_for_line(line_id, is_latest_line)
+        card, warning = japanese_srs.add_word(word, sentence, translation, screenshot)
     except japanese_srs.JapaneseSrsError as exc:
         return jsonify({"error": str(exc)}), 502
     except Exception as exc:  # noqa: BLE001 - report any failure to the Text Feed instead of a bare 500.
         logger.exception("Japanese SRS card creation failed.")
         return jsonify({"error": f"Unexpected error: {exc}"}), 500
-    return jsonify({"card": card}), 200
+    return jsonify({"card": card, "warning": warning}), 200
 
 
 @app.route("/translate-multiple", methods=["POST"])

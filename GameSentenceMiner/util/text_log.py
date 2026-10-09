@@ -664,7 +664,15 @@ def get_text_log() -> GameText:
 
 
 def add_line(current_line_after_regex, line_time, source: str) -> GameLine:
-    return game_log.add_line(current_line_after_regex, line_time, source=source)
+    new_line = game_log.add_line(current_line_after_regex, line_time, source=source)
+    if new_line is not None:
+        try:
+            from GameSentenceMiner import japanese_srs
+
+            japanese_srs.on_new_line(new_line)
+        except Exception as exc:  # noqa: BLE001 - optional integration; never block text intake.
+            logger.debug(f"Japanese SRS screenshot hook failed: {exc}")
+    return new_line
 
 
 def get_line_by_id(line_id: str) -> Optional[GameLine]:

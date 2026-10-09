@@ -3,11 +3,14 @@
 This is an alternative to the Anki flow: instead of waiting for Yomitan to add
 a note to Anki, GSM looks the mined word up through the app's Jisho endpoint
 and creates the card directly over the app's REST API, with the game line as
-its example sentence.
+its first example sentence and a screenshot of that moment attached.
 """
 
 from __future__ import annotations
 
+import io
+import threading
+from collections import OrderedDict
 from typing import Any
 
 import requests
@@ -15,6 +18,13 @@ import requests
 from GameSentenceMiner.util.config.configuration import JapaneseSrs, get_config, get_master_config, logger
 
 REQUEST_TIMEOUT_SECONDS = 20
+# Screenshots are taken as each line arrives, so a word mined from an older line
+# still gets that line's moment. Kept in memory for the most recent lines only.
+SCREENSHOT_CACHE_LINES = 100
+SCREENSHOT_MAX_SIDE = 1280
+SCREENSHOT_JPEG_QUALITY = 82
+# Page/advance markers some games draw at the end of a line.
+TRAILING_LINE_MARKERS = "▶▷►▸▼▽◆◇■□⏎↵"
 
 
 class JapaneseSrsError(Exception):
@@ -117,6 +127,62 @@ class JapaneseSrsClient:
     def create_card(self, deck_id: int, fields: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "cards/", json={**fields, "deck": deck_id})
 
+    def attach_image(self, card_id: int, jpeg: bytes) -> dict[str, Any]:
+        return self._request("POST", f"cards/{card_id}/image/", files={"image": ("screenshot.jpg", jpeg, "image/jpeg")})
+
+
+_screenshots: OrderedDict[str, bytes] = OrderedDict()
+_screenshots_lock = threading.Lock()
+
+
+def capture_screenshot_jpeg() -> bytes | None:
+    """The current OBS game frame as a compressed JPEG, or None if OBS has no frame."""
+    from GameSentenceMiner import obs
+
+    img = obs.get_screenshot_PIL(compression=90, img_format="jpg", log_missing_source=False, suppress_errors=True)
+    if img is None:
+        return None
+    img = img.convert("RGB")
+    img.thumbnail((SCREENSHOT_MAX_SIDE, SCREENSHOT_MAX_SIDE))
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=SCREENSHOT_JPEG_QUALITY, optimize=True)
+    return buffer.getvalue()
+
+
+def _remember_screenshot(line_id: str) -> None:
+    try:
+        jpeg = capture_screenshot_jpeg()
+    except Exception as exc:  # noqa: BLE001 - a missed screenshot must never disturb text intake.
+        logger.debug(f"Japanese SRS: couldn't screenshot line {line_id}: {exc}")
+        return
+    if jpeg is None:
+        return
+    with _screenshots_lock:
+        _screenshots[line_id] = jpeg
+        while len(_screenshots) > SCREENSHOT_CACHE_LINES:
+            _screenshots.popitem(last=False)
+
+
+def on_new_line(line: Any) -> None:
+    """Called for each new game line: screenshot the moment in the background."""
+    line_id = getattr(line, "id", None)
+    if line_id is None or not get_settings().enabled:
+        return
+    threading.Thread(target=_remember_screenshot, args=(str(line_id),), daemon=True, name="srs-screenshot").start()
+
+
+def screenshot_for_line(line_id: str | None, is_latest_line: bool) -> bytes | None:
+    with _screenshots_lock:
+        jpeg = _screenshots.get(str(line_id)) if line_id is not None else None
+    if jpeg is None and is_latest_line:
+        # The line arrived before Japanese SRS was on, but it's still on screen.
+        jpeg = capture_screenshot_jpeg()
+    return jpeg
+
+
+def clean_sentence(sentence: str) -> str:
+    return sentence.strip().rstrip(TRAILING_LINE_MARKERS).strip()
+
 
 def pick_entry(word: str, results: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Prefer an exact spelling or reading match; Jisho ranks by relevance otherwise."""
@@ -135,14 +201,21 @@ def build_card_fields(word: str, sentence: str, translation: str, entry: dict[st
         for key in fields:
             if entry.get(key):
                 fields[key] = entry[key]
-    sentence = sentence.strip()
+    sentence = clean_sentence(sentence)
     if sentence:
-        fields["example_sentences"] = [{"ja": sentence, "reading": "", "en": translation.strip()}]
+        # "source" lets the app keep this sentence first when it generates more.
+        fields["example_sentences"] = [{"ja": sentence, "reading": "", "en": translation.strip(), "source": "game"}]
     return fields
 
 
-def add_word(word: str, sentence: str = "", translation: str = "") -> dict[str, Any]:
-    """Look up ``word`` and add it to the configured deck. Returns the created card."""
+def add_word(
+    word: str, sentence: str = "", translation: str = "", screenshot: bytes | None = None
+) -> tuple[dict[str, Any], str]:
+    """Look up ``word`` and add it to the configured deck.
+
+    Returns the created card and a warning ("" if none). A failed screenshot
+    upload is only a warning: the card itself was saved.
+    """
     word = word.strip()
     if not word:
         raise JapaneseSrsError("Select a word in the line first.")
@@ -161,4 +234,12 @@ def add_word(word: str, sentence: str = "", translation: str = "") -> dict[str, 
     deck = client.get_or_create_deck(settings.deck_name)
     card = client.create_card(deck["id"], build_card_fields(word, sentence, translation, entry))
     logger.info(f"Added '{card.get('kanji')}' to Japanese SRS deck '{deck.get('name')}'.")
-    return card
+
+    warning = ""
+    if screenshot:
+        try:
+            card = client.attach_image(card["id"], screenshot)
+        except JapaneseSrsError as exc:
+            logger.warning(f"Japanese SRS: card added but the screenshot upload failed: {exc}")
+            warning = f"The screenshot couldn't be attached: {exc}"
+    return card, warning

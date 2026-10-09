@@ -6,6 +6,12 @@ export interface JapaneseSrsCard {
 	kanji: string;
 	reading: string;
 	meaning: string;
+	image_url?: string | null;
+}
+
+export interface JapaneseSrsAddResult {
+	card: JapaneseSrsCard;
+	warning?: string;
 }
 
 // Shows the "add to Japanese SRS" action only once it's turned on in GSM settings.
@@ -22,7 +28,7 @@ export async function refreshJapaneseSrsStatus() {
 	}
 }
 
-export async function addToJapaneseSrs(lineId: string, text: string, word: string): Promise<JapaneseSrsCard> {
+export async function addToJapaneseSrs(lineId: string, text: string, word: string): Promise<JapaneseSrsAddResult> {
 	const response = await fetch(getGSMEndpoint('/api/japanese-srs/add'), {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
@@ -32,10 +38,11 @@ export async function addToJapaneseSrs(lineId: string, text: string, word: strin
 	if (!response.ok) {
 		throw new Error(data.error || `Request failed (HTTP ${response.status}).`);
 	}
-	return data.card;
+	return { card: data.card, warning: data.warning || '' };
 }
 
-export function describeAddedCard(card: JapaneseSrsCard) {
+export function describeAddedCard({ card, warning }: JapaneseSrsAddResult) {
 	const reading = card.reading && card.reading !== card.kanji ? `（${card.reading}）` : '';
-	return `Added ${card.kanji}${reading} to Japanese SRS.`;
+	const shot = card.image_url ? ' with a screenshot' : '';
+	return `Added ${card.kanji}${reading} to Japanese SRS${shot}.${warning ? ` ${warning}` : ''}`;
 }
