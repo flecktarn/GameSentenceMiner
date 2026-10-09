@@ -135,35 +135,56 @@
 		return !!segment.in_srs || added.has(segment.base || '');
 	}
 
+	let wordAnchor: HTMLElement | null = null;
+
+	function wordPopoverStyle(anchor: HTMLElement) {
+		const view = getActionsWindow();
+		const rect = anchor.getBoundingClientRect();
+		const left = Math.min(Math.max(8, rect.left), view.innerWidth - 268);
+		const below = rect.bottom + 6 + 170 <= view.innerHeight;
+		const position = below ? `top: ${Math.round(rect.bottom + 6)}px;` : `bottom: ${Math.round(view.innerHeight - rect.top + 6)}px;`;
+		return `left: ${Math.round(left)}px; ${position}`;
+	}
+
+	// New lines auto-scroll the feed; keep the popover on its word instead of closing it.
+	function followWordAnchor() {
+		if (!wordPopover || !wordAnchor) return;
+		const rect = wordAnchor.getBoundingClientRect();
+		if (!wordAnchor.isConnected || rect.bottom < 0 || rect.top > getActionsWindow().innerHeight) {
+			closeWordPopover();
+			return;
+		}
+		wordPopover = { ...wordPopover, style: wordPopoverStyle(wordAnchor) };
+	}
+
 	function openWord(event: MouseEvent, segment: WordSegment) {
 		// A drag that selected text isn't a click on the word.
 		if (!getActionsWindow().getSelection()?.isCollapsed) return;
 		event.stopPropagation();
-		const view = getActionsWindow();
-		const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-		const left = Math.min(Math.max(8, rect.left), view.innerWidth - 268);
-		const below = rect.bottom + 6 + 170 <= view.innerHeight;
-		const position = below ? `top: ${Math.round(rect.bottom + 6)}px;` : `bottom: ${Math.round(view.innerHeight - rect.top + 6)}px;`;
-		const popover = { segment, style: `left: ${Math.round(left)}px; ${position}`, looking: true };
+		wordAnchor = event.currentTarget as HTMLElement;
+		const popover = { segment, style: wordPopoverStyle(wordAnchor), looking: true };
 		wordPopover = popover;
 		lookupWord(segment.base || segment.text).then(
 			(entry) => {
-				if (wordPopover === popover) wordPopover = { ...popover, entry, looking: false };
+				if (wordPopover?.segment === segment) wordPopover = { ...wordPopover, entry, looking: false };
 			},
 			(error: Error) => {
-				if (wordPopover === popover) wordPopover = { ...popover, lookupError: error.message, looking: false };
+				if (wordPopover?.segment === segment) wordPopover = { ...wordPopover, lookupError: error.message, looking: false };
 			},
 		);
 		getActionsDocument().addEventListener('click', closeWordPopover, false);
 		getActionsDocument().addEventListener('keydown', wordPopoverKeyHandler, false);
-		getActionsDocument().addEventListener('scroll', closeWordPopover, true);
+		getActionsDocument().addEventListener('scroll', followWordAnchor, true);
+		getActionsWindow().addEventListener('resize', followWordAnchor, false);
 	}
 
 	function closeWordPopover() {
 		wordPopover = null;
+		wordAnchor = null;
 		getActionsDocument().removeEventListener('click', closeWordPopover, false);
 		getActionsDocument().removeEventListener('keydown', wordPopoverKeyHandler, false);
-		getActionsDocument().removeEventListener('scroll', closeWordPopover, true);
+		getActionsDocument().removeEventListener('scroll', followWordAnchor, true);
+		getActionsWindow().removeEventListener('resize', followWordAnchor, false);
 	}
 
 	function wordPopoverKeyHandler(event: KeyboardEvent) {
