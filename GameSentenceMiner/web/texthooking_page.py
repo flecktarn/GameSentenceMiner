@@ -1340,6 +1340,23 @@ def japanese_srs_status():
     return jsonify({"enabled": settings.enabled, "configured": settings.is_configured()}), 200
 
 
+@app.route("/api/japanese-srs/tokenize", methods=["POST"])
+def japanese_srs_tokenize():
+    """Split Text Feed lines into vocabulary. Body: {"texts": [str, ...]}."""
+    from GameSentenceMiner import japanese_srs
+
+    texts = (request.get_json(silent=True) or {}).get("texts")
+    if not isinstance(texts, list) or len(texts) > 100 or not all(isinstance(t, str) for t in texts):
+        return jsonify({"error": "texts must be a list of up to 100 strings"}), 400
+    known = japanese_srs.known_words()
+    try:
+        lines = [japanese_srs.split_line(text[:1000], known) for text in texts]
+    except Exception as exc:  # noqa: BLE001 - tokenizer failures should only disable word splitting.
+        logger.warning(f"Japanese SRS: couldn't split lines into words: {exc}")
+        return jsonify({"error": f"Tokenizer unavailable: {exc}"}), 503
+    return jsonify({"lines": lines}), 200
+
+
 @app.route("/api/japanese-srs/add", methods=["POST"])
 def japanese_srs_add():
     """Add the word selected in a Text Feed line to the Japanese SRS app."""

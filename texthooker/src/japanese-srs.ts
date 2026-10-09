@@ -46,3 +46,68 @@ export function describeAddedCard({ card, warning }: JapaneseSrsAddResult) {
 	const shot = card.image_url ? ' with a screenshot' : '';
 	return `Added ${card.kanji}${reading} to Japanese SRS${shot}.${warning ? ` ${warning}` : ''}`;
 }
+
+export interface WordSegment {
+	text: string;
+	/** Dictionary form; only set on vocabulary that can be added. */
+	base?: string;
+	pos?: string;
+	in_srs?: boolean;
+}
+
+// Words added this session, so every line marks them without re-splitting.
+export const addedWords$ = writable(new Set<string>());
+
+export function rememberAddedWords(...words: (string | undefined)[]) {
+	addedWords$.update((set) => {
+		const next = new Set(set);
+		words.forEach((w) => w && next.add(w));
+		return next;
+	});
+}
+
+const SPLIT_CACHE_LIMIT = 500;
+const splitCache = new Map<string, Promise<WordSegment[] | null>>();
+let pendingSplits: { text: string; resolve: (segments: WordSegment[] | null) => void }[] = [];
+let splitTimer: ReturnType<typeof setTimeout> | undefined;
+
+// Lines that render together (e.g. history on page load) share one request.
+async function flushSplits() {
+	splitTimer = undefined;
+	while (pendingSplits.length) {
+		const batch = pendingSplits.splice(0, 100);
+		let lines: (WordSegment[] | null)[] = [];
+		try {
+			const response = await fetch(getGSMEndpoint('/api/japanese-srs/tokenize'), {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ texts: batch.map((item) => item.text) }),
+			});
+			if (response.ok) {
+				lines = (await response.json()).lines || [];
+			}
+		} catch {
+			// Fall back to plain text for these lines.
+		}
+		batch.forEach((item, i) => {
+			const segments = lines[i] || null;
+			if (!segments) splitCache.delete(item.text); // Retry next time instead of caching the failure.
+			item.resolve(segments);
+		});
+	}
+}
+
+/** Split a line into segments (exactly covering it), or null if word splitting is unavailable. */
+export function splitLine(text: string): Promise<WordSegment[] | null> {
+	const cached = splitCache.get(text);
+	if (cached) return cached;
+	const promise = new Promise<WordSegment[] | null>((resolve) => {
+		pendingSplits.push({ text, resolve });
+		splitTimer ??= setTimeout(flushSplits, 30);
+	});
+	splitCache.set(text, promise);
+	if (splitCache.size > SPLIT_CACHE_LIMIT) {
+		splitCache.delete(splitCache.keys().next().value as string);
+	}
+	return promise;
+}

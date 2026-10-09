@@ -9,7 +9,9 @@ its first example sentence and a screenshot of that moment attached.
 from __future__ import annotations
 
 import io
+import re
 import threading
+import time
 from collections import OrderedDict
 from typing import Any
 
@@ -25,6 +27,8 @@ SCREENSHOT_MAX_SIDE = 1280
 SCREENSHOT_JPEG_QUALITY = 82
 # Page/advance markers some games draw at the end of a line.
 TRAILING_LINE_MARKERS = "▶▷►▸▼▽◆◇■□⏎↵"
+# How long the list of words already in the SRS is trusted before a background refresh.
+KNOWN_WORDS_TTL_SECONDS = 300
 
 
 class JapaneseSrsError(Exception):
@@ -126,6 +130,22 @@ class JapaneseSrsClient:
 
     def create_card(self, deck_id: int, fields: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "cards/", json={**fields, "deck": deck_id})
+
+    def all_card_words(self) -> set[str]:
+        words: set[str] = set()
+        data = self._request("GET", "cards/", params={"page_size": 2000})
+        while True:
+            for card in data.get("results", []):
+                words.update(w for w in (card.get("kanji"), card.get("reading")) if w)
+            next_url = data.get("next")
+            if not next_url:
+                return words
+            try:
+                response = self.session.get(next_url, timeout=REQUEST_TIMEOUT_SECONDS)
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                raise JapaneseSrsError(f"Could not list cards: {exc}") from exc
+            data = response.json()
 
     def attach_image(self, card_id: int, jpeg: bytes) -> dict[str, Any]:
         return self._request("POST", f"cards/{card_id}/image/", files={"image": ("screenshot.jpg", jpeg, "image/jpeg")})
@@ -234,6 +254,7 @@ def add_word(
     deck = client.get_or_create_deck(settings.deck_name)
     card = client.create_card(deck["id"], build_card_fields(word, sentence, translation, entry))
     logger.info(f"Added '{card.get('kanji')}' to Japanese SRS deck '{deck.get('name')}'.")
+    remember_known_word(word, card.get("kanji", ""), card.get("reading", ""))
 
     warning = ""
     if screenshot:
@@ -243,3 +264,96 @@ def add_word(
             logger.warning(f"Japanese SRS: card added but the screenshot upload failed: {exc}")
             warning = f"The screenshot couldn't be attached: {exc}"
     return card, warning
+
+
+# --- Words already in the SRS (for marking them in the Text Feed) ---
+
+_known_words: set[str] = set()
+_known_words_fetched_at = 0.0
+_known_words_refreshing = False
+_known_words_lock = threading.Lock()
+
+
+def _refresh_known_words() -> None:
+    global _known_words, _known_words_fetched_at, _known_words_refreshing
+    try:
+        words = JapaneseSrsClient.from_settings().all_card_words()
+        with _known_words_lock:
+            _known_words = words
+            _known_words_fetched_at = time.monotonic()
+    except Exception as exc:  # noqa: BLE001 - marking known words is best-effort.
+        logger.debug(f"Japanese SRS: couldn't refresh known words: {exc}")
+    finally:
+        with _known_words_lock:
+            _known_words_refreshing = False
+
+
+def known_words() -> set[str]:
+    """Words on cards already in the SRS. Never blocks: a stale list refreshes in the background."""
+    global _known_words_refreshing
+    with _known_words_lock:
+        stale = time.monotonic() - _known_words_fetched_at > KNOWN_WORDS_TTL_SECONDS
+        start = stale and not _known_words_refreshing and get_settings().is_configured()
+        if start:
+            _known_words_refreshing = True
+        words = set(_known_words)
+    if start:
+        threading.Thread(target=_refresh_known_words, daemon=True, name="srs-known-words").start()
+    return words
+
+
+def remember_known_word(*words: str) -> None:
+    with _known_words_lock:
+        _known_words.update(w for w in words if w)
+
+
+# --- Splitting a line into clickable vocabulary ---
+
+VOCAB_PARTS_OF_SPEECH = {
+    "noun",
+    "verb",
+    "i_adjective",
+    "adverb",
+    "adnominal_adjective",
+    "interjection",
+    "conjunction",
+}
+# Kana verbs MeCab tags as verbs but that act as grammar here (passive, progressive, ...).
+GRAMMAR_VERBS = {"れる", "られる", "せる", "させる", "いる", "ある", "おる", "しまう", "ちゃう", "おく", "てる", "とく"}
+_KANA_ONLY = re.compile(r"^[\u3040-\u30ffー]+$")
+_HAS_JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff々]")
+
+
+def _is_vocab(surface: str, base: str, pos: str) -> bool:
+    if pos not in VOCAB_PARTS_OF_SPEECH or not _HAS_JAPANESE.search(surface):
+        return False
+    if pos == "verb" and base in GRAMMAR_VERBS:
+        return False
+    # Single-kana nouns are almost always grammar (の, ん, こ).
+    return not (pos == "noun" and len(surface) == 1 and _KANA_ONLY.match(surface))
+
+
+def split_line(text: str, known: set[str] | None = None) -> list[dict[str, Any]]:
+    """Segments covering ``text`` exactly; vocabulary segments carry their dictionary form."""
+    from GameSentenceMiner.tokenizer import tokenizer
+
+    known = known or set()
+    segments: list[dict[str, Any]] = []
+    cursor = 0
+    for token in tokenizer.translate(text):
+        surface = getattr(token, "word", "") or ""
+        start = text.find(surface, cursor) if surface else -1
+        if start < 0:
+            continue  # The tokenizer normalised something; leave it inside the next gap.
+        if start > cursor:
+            segments.append({"text": text[cursor:start]})
+        part_of_speech = getattr(getattr(token, "part_of_speech", None), "name", "") or ""
+        base = getattr(token, "headword", None) or surface
+        segment: dict[str, Any] = {"text": surface}
+        if _is_vocab(surface, base, part_of_speech):
+            segment.update(base=base, pos=part_of_speech, in_srs=base in known or surface in known)
+        segments.append(segment)
+        cursor = start + len(surface)
+    if cursor < len(text):
+        segments.append({"text": text[cursor:]})
+    return segments

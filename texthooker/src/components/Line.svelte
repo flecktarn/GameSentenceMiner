@@ -46,7 +46,15 @@
 	import Icon from './Icon.svelte';
 	import AIHelp from './AIHelp.svelte';
 	import { formatMegabytes, getGSMEndpoint } from '../gsm';
-	import { addToJapaneseSrs, describeAddedCard, japaneseSrsEnabled$ } from '../japanese-srs';
+	import {
+		addedWords$,
+		addToJapaneseSrs,
+		describeAddedCard,
+		japaneseSrsEnabled$,
+		rememberAddedWords,
+		splitLine,
+		type WordSegment,
+	} from '../japanese-srs';
 
 	export let line: LineItem;
 	export let index: number;
@@ -99,6 +107,56 @@
 	let srsMessage = '';
 	let srsError = false;
 	let srsMessageTimer: ReturnType<typeof setTimeout> | undefined;
+	// The line split into vocabulary, so words can be clicked and added to the SRS.
+	let segments: WordSegment[] | null = null;
+	let segmentsFor = '';
+	let wordPopover: { segment: WordSegment; style: string } | null = null;
+	$: if ($japaneseSrsEnabled$ && line.text !== segmentsFor) {
+		loadSegments(line.text);
+	}
+
+	async function loadSegments(text: string) {
+		segmentsFor = text;
+		const result = await splitLine(text);
+		if (segmentsFor === text) {
+			segments = result;
+		}
+	}
+
+	function isInSrs(segment: WordSegment, added: Set<string>) {
+		return !!segment.in_srs || added.has(segment.base || '');
+	}
+
+	function openWord(event: MouseEvent, segment: WordSegment) {
+		// A drag that selected text isn't a click on the word.
+		if (!getActionsWindow().getSelection()?.isCollapsed) return;
+		event.stopPropagation();
+		const view = getActionsWindow();
+		const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+		const left = Math.min(Math.max(8, rect.left), view.innerWidth - 228);
+		const below = rect.bottom + 6 + 90 <= view.innerHeight;
+		const position = below ? `top: ${Math.round(rect.bottom + 6)}px;` : `bottom: ${Math.round(view.innerHeight - rect.top + 6)}px;`;
+		wordPopover = { segment, style: `left: ${Math.round(left)}px; ${position}` };
+		getActionsDocument().addEventListener('click', closeWordPopover, false);
+		getActionsDocument().addEventListener('keydown', wordPopoverKeyHandler, false);
+		getActionsDocument().addEventListener('scroll', closeWordPopover, true);
+	}
+
+	function closeWordPopover() {
+		wordPopover = null;
+		getActionsDocument().removeEventListener('click', closeWordPopover, false);
+		getActionsDocument().removeEventListener('keydown', wordPopoverKeyHandler, false);
+		getActionsDocument().removeEventListener('scroll', closeWordPopover, true);
+	}
+
+	function wordPopoverKeyHandler(event: KeyboardEvent) {
+		if (event.key === 'Escape') closeWordPopover();
+	}
+
+	function addWordFromPopover(segment: WordSegment) {
+		closeWordPopover();
+		void addSelectionToJapaneseSrs(segment.base);
+	}
 	$: actionsMenuOpen = openMenu === 'actions';
 	$: isAudioLine = audioLineId === line.id;
 	$: isAudioPending = audioPendingLineId === line.id;
@@ -133,6 +191,7 @@
 		componentMounted = false;
 		document.removeEventListener('click', clickOutsideHandler, false);
 		removeActionsMenuListeners();
+		closeWordPopover();
 		dispatch('edit', { inEdit: false });
 	});
 
@@ -412,7 +471,9 @@
 		srsBusy = true;
 		showSrsMessage(`Adding ${word}…`, false);
 		try {
-			showSrsMessage(describeAddedCard(await addToJapaneseSrs(line.id, line.text, word)), false);
+			const result = await addToJapaneseSrs(line.id, line.text, word);
+			rememberAddedWords(word, result.card.kanji, result.card.reading);
+			showSrsMessage(describeAddedCard(result), false);
 		} catch (error) {
 			showSrsMessage((error as Error).message || 'Could not add the card. Check that GSM is running.', true);
 		} finally {
@@ -527,7 +588,7 @@
 				bind:this={paragraph}
 				in:fly={{ x: isVerticalDisplay ? 100 : -100, duration: $enableLineAnimation$ ? 250 : 0 }}
 			>
-				{line.text}
+				{#if segments && !isEditable}{#each segments as segment}{#if segment.base}<span class="srs-word" class:in-srs={isInSrs(segment, $addedWords$)} role="button" tabindex="-1" title={isInSrs(segment, $addedWords$) ? `${segment.base} · in your SRS` : segment.base} on:click={(event) => openWord(event, segment)} on:keyup={dummyFn}>{segment.text}</span>{:else}{segment.text}{/if}{/each}{:else}{line.text}{/if}
 				{#if line.translation}
 					<span
 						class:blur-translation={line.blurTranslation}
@@ -771,6 +832,20 @@
 		</div>
 	</div>
 {/key}
+{#if wordPopover}
+	<div class="srs-word-popover" style={wordPopover.style} on:click|stopPropagation={dummyFn} on:keyup={dummyFn} role="dialog" tabindex="-1">
+		<div class="srs-word-popover-word">{wordPopover.segment.base}</div>
+		{#if wordPopover.segment.base !== wordPopover.segment.text}
+			<div class="srs-word-popover-note">as 「{wordPopover.segment.text}」 in this line</div>
+		{/if}
+		{#if isInSrs(wordPopover.segment, $addedWords$)}
+			<div class="srs-word-popover-note in-srs">✓ Already in your SRS</div>
+		{/if}
+		<button disabled={srsBusy} on:click={() => wordPopover && addWordFromPopover(wordPopover.segment)}>
+			{isInSrs(wordPopover.segment, $addedWords$) ? 'Add again' : 'Add to Japanese SRS'}
+		</button>
+	</div>
+{/if}
 {#if srsMessage}
 	<p role={srsError ? 'alert' : 'status'} class="mx-4 text-sm" class:text-error={srsError}>{srsMessage}</p>
 {/if}
@@ -801,6 +876,67 @@
 {/if}
 
 <style>
+	.srs-word {
+		cursor: pointer;
+		border-bottom: 1px dotted rgb(160 160 160 / 70%);
+		border-radius: 2px;
+	}
+
+	.srs-word:hover {
+		background: rgb(96 150 255 / 22%);
+	}
+
+	.srs-word.in-srs {
+		border-bottom: 1px solid rgb(78 157 108 / 85%);
+	}
+
+	.srs-word-popover {
+		position: fixed;
+		z-index: 70;
+		width: 220px;
+		padding: 8px;
+		border: 1px solid #555;
+		border-radius: 4px;
+		background: #222;
+		box-shadow: 0 4px 14px rgb(0 0 0 / 35%);
+		color: #fff;
+		font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+		font-size: 12px;
+		line-height: 1.3;
+	}
+
+	.srs-word-popover-word {
+		font-size: 20px;
+		font-weight: 700;
+	}
+
+	.srs-word-popover-note {
+		margin-top: 2px;
+		color: #aaa;
+	}
+
+	.srs-word-popover-note.in-srs {
+		color: #7ccf98;
+	}
+
+	.srs-word-popover button {
+		width: 100%;
+		margin-top: 8px;
+		padding: 6px 8px;
+		border: 0;
+		border-radius: 3px;
+		background: #3f7fb0;
+		color: #fff;
+		font: inherit;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.srs-word-popover button:disabled {
+		opacity: 0.5;
+		cursor: default;
+	}
+
 	p:focus-visible {
 		outline: none;
 	}

@@ -293,3 +293,97 @@ def test_capture_compresses_to_a_bounded_jpeg(monkeypatch):
     img = Image.open(japanese_srs.io.BytesIO(jpeg))
     assert img.format == "JPEG"
     assert max(img.size) == japanese_srs.SCREENSHOT_MAX_SIDE
+
+
+def _vocab(segments):
+    return [(s["text"], s["base"]) for s in segments if "base" in s]
+
+
+def test_split_line_covers_the_line_and_marks_vocabulary():
+    line = "どうせ引き裂かれるなら、涙が…顔をもっとぐしゃぐしゃにする…。▼"
+
+    segments = japanese_srs.split_line(line, known={"涙"})
+
+    assert "".join(s["text"] for s in segments) == line
+    vocab = _vocab(segments)
+    assert ("引き裂か", "引き裂く") in vocab  # Inflected verbs offer their dictionary form.
+    assert ("涙", "涙") in vocab and ("顔", "顔") in vocab and ("ぐしゃぐしゃ", "ぐしゃぐしゃ") in vocab
+    plain = [s["text"] for s in segments if "base" not in s]
+    for grammar in ("れる", "なら", "が", "を", "に", "、", "…"):
+        assert grammar in plain
+    assert [s["in_srs"] for s in segments if s.get("base") == "涙"] == [True]
+    assert all(not s["in_srs"] for s in segments if s.get("base") == "顔")
+
+
+def test_split_line_keeps_whitespace_and_skips_numbers():
+    line = "今日は 2回目\n授業だ"
+
+    segments = japanese_srs.split_line(line)
+
+    assert "".join(s["text"] for s in segments) == line
+    assert "2" not in [s["text"] for s in segments if "base" in s]
+
+
+@pytest.mark.parametrize(
+    ("surface", "base", "pos", "expected"),
+    [
+        ("見", "見る", "verb", True),
+        ("いる", "いる", "verb", False),
+        ("れ", "れる", "verb", False),
+        ("の", "の", "noun", False),
+        ("花", "花", "noun", True),
+        ("は", "は", "particle", False),
+        ("だ", "だ", "bound_auxiliary", False),
+        ("ABC", "ABC", "noun", False),
+    ],
+)
+def test_vocab_filter(surface, base, pos, expected):
+    assert japanese_srs._is_vocab(surface, base, pos) is expected
+
+
+def test_known_words_refresh_in_background_and_include_added_words(monkeypatch):
+    monkeypatch.setattr(japanese_srs, "_known_words", set())
+    monkeypatch.setattr(japanese_srs, "_known_words_fetched_at", 0.0)
+    monkeypatch.setattr(japanese_srs, "_known_words_refreshing", False)
+    monkeypatch.setattr(japanese_srs, "get_settings", lambda: JapaneseSrs(enabled=True, token="t"))
+    started = []
+    monkeypatch.setattr(
+        japanese_srs.threading, "Thread", lambda target, **kw: SimpleNamespace(start=lambda: started.append(target))
+    )
+
+    assert japanese_srs.known_words() == set()  # Returns at once; the fetch runs in the background.
+    assert started == [japanese_srs._refresh_known_words]
+    japanese_srs.known_words()
+    assert len(started) == 1  # No second refresh while one is running.
+
+    japanese_srs.remember_known_word("猫", "")
+    assert japanese_srs.known_words() == {"猫"}
+
+
+def test_all_card_words_collects_spellings_and_readings(backend):
+    backend.cards.extend([{"id": 1, "kanji": "猫", "reading": "ねこ"}, {"id": 2, "kanji": "犬", "reading": ""}])
+    original = backend.request
+
+    def request(method, url, **kwargs):
+        if url == f"{API}/cards/" and method == "GET":
+            return FakeResponse(200, {"next": None, "results": backend.cards})
+        return original(method, url, **kwargs)
+
+    backend.request = request
+    assert japanese_srs.JapaneseSrsClient(API, "t").all_card_words() == {"猫", "ねこ", "犬"}
+
+
+def test_tokenize_route(monkeypatch):
+    from GameSentenceMiner.web import texthooking_page
+
+    monkeypatch.setattr(japanese_srs, "known_words", lambda: {"顔"})
+    client = texthooking_page.app.test_client()
+
+    response = client.post("/api/japanese-srs/tokenize", json={"texts": ["顔を見る", ""]})
+
+    assert response.status_code == 200
+    first, empty = response.get_json()["lines"]
+    assert "".join(s["text"] for s in first) == "顔を見る"
+    assert {"text": "顔", "base": "顔", "pos": "noun", "in_srs": True} in first
+    assert empty == []
+    assert client.post("/api/japanese-srs/tokenize", json={"texts": "nope"}).status_code == 400
