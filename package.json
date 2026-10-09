@@ -113,7 +113,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "bpwhelan",
+        "owner": "flecktarn",
         "repo": "GameSentenceMiner",
         "releaseType": "release"
       }

@@ -113,7 +113,7 @@ function getAutoUpdater(forceDev: boolean = false): AppUpdater {
 
     autoUpdater.setFeedURL({
         provider: 'github',
-        owner: 'bpwhelan',
+        owner: 'flecktarn', // Fork: never offer upstream builds over this one.
         repo: 'GameSentenceMiner',
         private: false,
         releaseType: wantPreRelease ? 'prerelease' : 'release',

@@ -1332,6 +1332,36 @@ def translate_line():
     return jsonify({"TL": translation}), 200
 
 
+@app.route("/api/japanese-srs/status", methods=["GET"])
+def japanese_srs_status():
+    from GameSentenceMiner import japanese_srs
+
+    settings = japanese_srs.get_settings()
+    return jsonify({"enabled": settings.enabled, "configured": settings.is_configured()}), 200
+
+
+@app.route("/api/japanese-srs/add", methods=["POST"])
+def japanese_srs_add():
+    """Add the word selected in a Text Feed line to the Japanese SRS app."""
+    from GameSentenceMiner import japanese_srs
+
+    data = request.get_json(silent=True) or {}
+    word = str(data.get("word") or "").strip()
+    if not word:
+        return jsonify({"error": "Select a word in the line first."}), 400
+    line = get_event_line_by_id(data.get("id")) if data.get("id") is not None else None
+    sentence = line.text if line is not None else str(data.get("text") or "")
+    translation = getattr(line, "TL", "") or ""
+    try:
+        card = japanese_srs.add_word(word, sentence, translation)
+    except japanese_srs.JapaneseSrsError as exc:
+        return jsonify({"error": str(exc)}), 502
+    except Exception as exc:  # noqa: BLE001 - report any failure to the Text Feed instead of a bare 500.
+        logger.exception("Japanese SRS card creation failed.")
+        return jsonify({"error": f"Unexpected error: {exc}"}), 500
+    return jsonify({"card": card}), 200
+
+
 @app.route("/translate-multiple", methods=["POST"])
 def translate_multiple():
     """

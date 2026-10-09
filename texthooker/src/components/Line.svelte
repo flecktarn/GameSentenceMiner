@@ -1,5 +1,6 @@
 <script lang="ts">
 	import {
+		mdiCardPlusOutline,
 		mdiClockOutline,
 		mdiContentSave,
 		mdiContentSaveCheck,
@@ -45,6 +46,7 @@
 	import Icon from './Icon.svelte';
 	import AIHelp from './AIHelp.svelte';
 	import { formatMegabytes, getGSMEndpoint } from '../gsm';
+	import { addToJapaneseSrs, describeAddedCard, japaneseSrsEnabled$ } from '../japanese-srs';
 
 	export let line: LineItem;
 	export let index: number;
@@ -92,6 +94,11 @@
 	let actionsMenuPopover: HTMLElement;
 	let actionsMenuStyle = 'visibility: hidden;';
 	let aiError = '';
+	let srsWord = '';
+	let srsBusy = false;
+	let srsMessage = '';
+	let srsError = false;
+	let srsMessageTimer: ReturnType<typeof setTimeout> | undefined;
 	$: actionsMenuOpen = openMenu === 'actions';
 	$: isAudioLine = audioLineId === line.id;
 	$: isAudioPending = audioPendingLineId === line.id;
@@ -369,6 +376,50 @@
 		}
 	}
 
+	function selectedWordInLine() {
+		const selection = getActionsWindow().getSelection();
+		if (!selection || selection.isCollapsed || !paragraph) {
+			return '';
+		}
+		if (!paragraph.contains(selection.anchorNode) || !paragraph.contains(selection.focusNode)) {
+			return '';
+		}
+		return selection.toString().trim();
+	}
+
+	function showSrsMessage(message: string, isError: boolean) {
+		clearTimeout(srsMessageTimer);
+		srsMessage = message;
+		srsError = isError;
+		if (!isError) {
+			srsMessageTimer = setTimeout(() => (srsMessage = ''), 4000);
+		}
+	}
+
+	// Runs on mousedown, before the click clears the reader's selection.
+	function captureSrsWord() {
+		srsWord = selectedWordInLine();
+	}
+
+	export async function addSelectionToJapaneseSrs(word = selectedWordInLine()) {
+		if (srsBusy) {
+			return;
+		}
+		if (!word) {
+			showSrsMessage('Select a word in this line first, then add it to Japanese SRS.', true);
+			return;
+		}
+		srsBusy = true;
+		showSrsMessage(`Adding ${word}…`, false);
+		try {
+			showSrsMessage(describeAddedCard(await addToJapaneseSrs(line.id, line.text, word)), false);
+		} catch (error) {
+			showSrsMessage((error as Error).message || 'Could not add the card. Check that GSM is running.', true);
+		} finally {
+			srsBusy = false;
+		}
+	}
+
 	function handleAction(id: string, action: string, blurTranslate: boolean = false, automatic: boolean = false) {
 		closeActionsMenu();
 		if (action === 'TL') aiError = '';
@@ -623,6 +674,19 @@
 					<Icon path={mdiHistory} width="32px" height="32px" />
 				</div>
 			{/if}
+			{#if $japaneseSrsEnabled$ && line.id}
+				<button
+					class="action-button"
+					on:mousedown={captureSrsWord}
+					on:click={() => addSelectionToJapaneseSrs(srsWord)}
+					title="Add the selected word to Japanese SRS (Alt+J)"
+					aria-label="Add the selected word to Japanese SRS"
+					tabindex="-1"
+					disabled={srsBusy}
+				>
+					<Icon path={mdiCardPlusOutline} width="16px" height="16px" />
+				</button>
+			{/if}
 			{#if canAskAI}
 				<div class="actions-menu">
 					<button
@@ -707,6 +771,9 @@
 		</div>
 	</div>
 {/key}
+{#if srsMessage}
+	<p role={srsError ? 'alert' : 'status'} class="mx-4 text-sm" class:text-error={srsError}>{srsMessage}</p>
+{/if}
 {#if aiError}
 	<p role="alert" class="mx-4 text-sm">{aiError} <a class="underline" href="https://docs.gamesentenceminer.com/docs/features/ai-features" target="_blank" rel="noreferrer">AI setup guide</a></p>
 {/if}

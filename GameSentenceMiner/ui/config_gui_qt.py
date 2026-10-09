@@ -78,6 +78,7 @@ from GameSentenceMiner.ui.config.tabs.general import (
     build_discord_tab,
 )
 from GameSentenceMiner.ui.config.tabs.hotkeys import build_hotkeys_tab
+from GameSentenceMiner.ui.config.tabs.japanese_srs import build_japanese_srs_tab
 from GameSentenceMiner.ui.config.tabs.obs import build_obs_tab
 from GameSentenceMiner.ui.config.tabs.overlay import build_overlay_tab
 from GameSentenceMiner.ui.config.tabs.paths import build_paths_tab
@@ -1217,6 +1218,7 @@ class ConfigWindow(QWidget):
                 show_reading_stats=self.editor.master_config.discord.show_reading_stats,
                 blacklisted_scenes=discord_blacklisted,
             )
+            self.master_config.japanese_srs = copy.deepcopy(self.editor.master_config.japanese_srs)
 
             self._write_config_backup_if_needed(force=force_backup)
 
@@ -2496,6 +2498,7 @@ class ConfigWindow(QWidget):
                 ("confirmation", self._create_anki_confirmation_tab(), "Confirmation"),
                 ("field_grouping", self._create_anki_field_grouping_tab(), "Field Grouping"),
                 ("tags", self._create_anki_tags_tab(), "Tags"),
+                ("japanese_srs", self._create_japanese_srs_tab(), "Japanese SRS"),
             ],
             root_key="anki",
         )
@@ -3062,6 +3065,9 @@ class ConfigWindow(QWidget):
 
     def _create_anki_tags_tab(self):
         return build_anki_tags_tab(self, self.i18n)
+
+    def _create_japanese_srs_tab(self):
+        return build_japanese_srs_tab(self, self.binder, self.i18n)
 
     def _create_vad_tab(self):
         return build_vad_tab(self, self.i18n)

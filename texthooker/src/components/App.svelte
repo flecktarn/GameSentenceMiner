@@ -112,6 +112,7 @@
 	import Spinner from './Spinner.svelte';
 	import Stats from './Stats.svelte';
 	import { describeSavedClips, fetchSavedClips, getGSMEndpoint, trashSavedClips } from '../gsm';
+	import { japaneseSrsEnabled$, refreshJapaneseSrsStatus } from '../japanese-srs';
 
 	let isSmFactor = false;
 	let settingsComponent: Settings;
@@ -347,11 +348,14 @@
 		audioEventsSub = texthookerAudioEvents$.subscribe(handleAudioEvent);
 		void loadSavedClips();
 		window.addEventListener('focus', loadSavedClips);
+		void refreshJapaneseSrsStatus();
+		window.addEventListener('focus', refreshJapaneseSrsStatus);
 
 		return () => {
 			textFeedSessionSyncVersion += 1;
 			audioEventsSub?.unsubscribe();
 			window.removeEventListener('focus', loadSavedClips);
+			window.removeEventListener('focus', refreshJapaneseSrsStatus);
 			if (audioElement) {
 				audioElement.pause();
 				audioElement.src = '';
@@ -394,6 +398,9 @@
 			}
 		} else if (selectedLineIds.length && key === 'escape') {
 			deselectLines();
+		} else if (event.altKey && event.code === 'KeyJ' && $japaneseSrsEnabled$) {
+			// event.code, not key: Option+J types "∆" on macOS.
+			addSelectionToJapaneseSrs();
 		} else if (event.altKey && key === 'a') {
 			settingsComponent.handleReset(false);
 		} else if (event.altKey && key === 'q') {
@@ -401,6 +408,15 @@
 		} else if ((event.ctrlKey || event.metaKey) && key === ' ') {
 			void handleTextFeedTimerToggle(false);
 		}
+	}
+
+	function addSelectionToJapaneseSrs() {
+		const selection = window.getSelection();
+		if (!selection?.toString().trim() || !selection.rangeCount) {
+			return;
+		}
+		const range = selection.getRangeAt(0);
+		lineElements.find((lineElement) => lineElement?.getIdIfSelected(range))?.addSelectionToJapaneseSrs();
 	}
 
 	async function handleTextFeedTimerToggle(showClarification = true) {

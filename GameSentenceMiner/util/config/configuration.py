@@ -1889,6 +1889,28 @@ class Discord:
 
 @dataclass_json
 @dataclass
+class JapaneseSrs:
+    """Sends mined words to the Japanese SRS app (japanese-srs) instead of Anki."""
+
+    enabled: bool = False
+    api_url: str = "https://japanese-api-kvcm.onrender.com/api"
+    username: str = ""
+    # API token from /auth/login/. The password itself is never stored.
+    token: str = ""
+    deck_name: str = "Default"
+
+    def __post_init__(self):
+        self.api_url = str(self.api_url or "").strip().rstrip("/")
+        self.username = str(self.username or "").strip()
+        self.token = str(self.token or "").strip()
+        self.deck_name = str(self.deck_name or "").strip() or "Default"
+
+    def is_configured(self) -> bool:
+        return bool(self.enabled and self.api_url and self.token)
+
+
+@dataclass_json
+@dataclass
 class Config:
     configs: Dict[str, ProfileConfig] = field(default_factory=dict)
     current_profile: str = DEFAULT_CONFIG
@@ -1898,6 +1920,7 @@ class Config:
     overlay: Overlay = field(default_factory=Overlay)
     experimental: Experimental = field(default_factory=Experimental)
     discord: Discord = field(default_factory=Discord)
+    japanese_srs: JapaneseSrs = field(default_factory=JapaneseSrs)
     version: str = ""
 
     @classmethod
