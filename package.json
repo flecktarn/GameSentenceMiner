@@ -41,7 +41,8 @@
   "tsc": {},
   "build": {
     "asar": true,
-    "appId": "com.beangate.gamesentenceminer",
+    "appId": "com.flecktarn.gamesentenceminer.fork",
+    "productName": "GameSentenceMiner (FORK)",
     "files": [
       "dist/main/**/*",
       "dist/preload/**/*",

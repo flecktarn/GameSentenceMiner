@@ -4,6 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 
 import {
     execFileAsync,
+    getAssetsDir,
     getResourcesDir,
     getSanitizedPythonEnv,
     isDev,
@@ -438,6 +439,17 @@ function getNextReleaseVersion(version: string): string | null {
  * changes, and the dev version usually isn't published to PyPI). We also fall
  * back to the bundled source path if the version can't be read.
  */
+function resolveBundledLocalBackendWheelPath(version: string): string | null {
+    const wheelDir = path.join(getAssetsDir(), 'python');
+    const prefix = `gamesentenceminer-${version}-`.toLowerCase();
+    try {
+        const wheel = fs.readdirSync(wheelDir).find((name) => name.toLowerCase().startsWith(prefix) && name.endsWith('.whl'));
+        return wheel ? path.join(wheelDir, wheel) : null;
+    } catch {
+        return null;
+    }
+}
+
 export function getBundledBackendSpecifier(): string {
     if (isDev) {
         return getProjectPath();
@@ -449,6 +461,10 @@ export function getBundledBackendSpecifier(): string {
     }
 
     const version = getBundledBackendVersion();
+    if (version?.includes('+')) {
+        // PyPI can't serve a local version such as 2026.10.0+fork; install the fork's bundled wheel.
+        return resolveBundledLocalBackendWheelPath(version) ?? getProjectPath();
+    }
     if (version) {
         const nextReleaseVersion = getNextReleaseVersion(version);
         if (nextReleaseVersion) {
